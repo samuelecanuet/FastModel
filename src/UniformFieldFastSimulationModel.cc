@@ -324,7 +324,10 @@ G4bool UniformFieldFastSimulationModel::IsOrbitContainedInEnvelope(
 
   const auto localPosition = fastTrack.GetPrimaryTrackLocalPosition();
   const auto localMomentum = fastTrack.GetPrimaryTrackLocalMomentum();
-  if (solid->Inside(localPosition) != kInside) {
+  // A track entering the fast region can start its first step exactly on the
+  // envelope surface. Accept that state; GetTargetSurface below still requires
+  // a forward z face, so a track leaving the envelope will not trigger here.
+  if (solid->Inside(localPosition) == kOutside) {
     return false;
   }
 

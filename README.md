@@ -34,11 +34,11 @@ ordinary transport.
   `ConfigureAndAttach` is called, whether fast mode is enabled or not.
 - **Physics is skipped during the fast step.** `DoIt` analytically updates the
   charged particle's state and time but does not run the normal Geant4 physics
-  processes. The model advances proper time but does not sample a decay or generate its
-- daughters inside the fast step. An unstable particle may only be checked for
-  decay after the shortcut, so a decay that should occur inside the volume
-  will not have its correct position or daughters. Do not use this model where
-  decay in flight matters unless decay handling is added.
+  processes. The model advances proper time but does not sample a decay or
+  generate its daughters inside the fast step. An unstable particle may only be 
+  checked for decay after the shortcut, so a decay that should occur inside the
+   volume will not have its correct position or daughters. Do not use this model 
+  where decay in flight matters unless decay handling is added.
 
 ## Create a fast volume
 

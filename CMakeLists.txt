@@ -1,3 +1,13 @@
+cmake_minimum_required(VERSION 3.16)
+
+# This directory can be built directly for a compile check or added to a
+# parent simulation after it has found Geant4.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(UniformFieldFastModel LANGUAGES CXX)
+  find_package(Geant4 REQUIRED)
+  include(${Geant4_USE_FILE})
+endif()
+
 add_library(UniformFieldFastModel
   src/UniformFieldFastGeometry.cc
   src/UniformFieldFastMessenger.cc

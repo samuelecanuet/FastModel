@@ -32,16 +32,13 @@ public:
   G4VPhysicalVolume* GetPhysicalVolume() const { return fPhysicalVolume; }
   G4Region* GetRegion() const { return fRegion; }
 
-  // Check all fast geometries created on this thread after construction ends.
+  // Check only fast geometries created on this thread after construction ends.
   static void CheckRegisteredOverlaps();
 
   // Check an explicit collection of fast-volume placements.
   static void CheckForOverlaps(
       const std::vector<G4VPhysicalVolume*>& fastVolumes);
 
-  // Check every placement in the Geant4 physical-volume store. Overlaps are
-  // allowed only when the overlapping placement uses vacuumMaterial.
-  static void CheckNonVacuumOverlaps(const G4Material* vacuumMaterial);
 
 private:
   void Build(const G4String& name, G4LogicalVolume* mother,

@@ -28,10 +28,10 @@ ordinary transport.
   partial-phi tubes are rejected when the model is attached.
 - The analytic propagator requires nonzero forward or backward z momentum
   toward a z face. Tracks that fail its checks use ordinary transport.
-- Fast volumes must not overlap each other.
-  General geometry overlaps are allowed only for placements made of the
-  supplied vacuum material. The overlap checks run when
-  `ConfigureAndAttach` is called, whether fast mode is enabled or not.
+- Fast volumes must not overlap each other. `ConfigureAndAttach` checks only
+  registered fast-volume placements; it does not inspect ordinary detector
+  geometry. Hollow `G4Tubs` bores are treated as empty space by the solid
+  intersection check. This check runs whether fast mode is enabled or not.
 - **Physics is skipped during the fast step.** `DoIt` analytically updates the
   charged particle's state and time but does not run the normal Geant4 physics
   processes. The model advances proper time but does not sample a decay or

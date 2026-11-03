@@ -8,6 +8,8 @@
 #include "G4Box.hh"
 #include "G4Exception.hh"
 #include "G4FastSimulationHelper.hh"
+#include "G4FastSimulationManager.hh"
+#include "G4FastSimulationManagerProcess.hh"
 #include "G4FastStep.hh"
 #include "G4FastTrack.hh"
 #include "G4GeometryTolerance.hh"
@@ -115,9 +117,6 @@ UniformFieldFastSimulationModel::UniformFieldFastSimulationModel(
 
 void UniformFieldFastSimulationModel::ConfigureAndAttach(
     const UniformFieldFastGeometry* fastGeometry) {
-  const auto* vacuumMaterial =
-      G4NistManager::Instance()->FindOrBuildMaterial("G4_Galactic");
-  UniformFieldFastGeometry::CheckNonVacuumOverlaps(vacuumMaterial);
   UniformFieldFastGeometry::CheckRegisteredOverlaps();
 
   if (!UniformFieldFastMessenger::Instance()->IsEnabled()) {
@@ -133,7 +132,27 @@ void UniformFieldFastSimulationModel::ConfigureAndAttach(
     return;
   }
 
-  new UniformFieldFastSimulationModel(fastGeometry);
+  auto* region = fastGeometry->GetRegion();
+  auto* fastSimulationManager =
+      region == nullptr ? nullptr : region->GetFastSimulationManager();
+  G4bool modelAlreadyAttached = false;
+  if (fastSimulationManager != nullptr) {
+    for (const auto* model :
+         fastSimulationManager->GetFastSimulationModelList()) {
+      if (model != nullptr && model->GetName() == "FastMagneticField") {
+        modelAlreadyAttached = true;
+        break;
+      }
+    }
+  }
+
+  if (!modelAlreadyAttached) {
+    new UniformFieldFastSimulationModel(fastGeometry);
+  }
+
+  // Geometry reinitialization replaces the mass world. Refresh the world
+  // pointer held by the fast-simulation process before the next track starts.
+  ActivateForChargedParticles();
 }
 
 void UniformFieldFastSimulationModel::ActivateForChargedParticles() {
@@ -142,6 +161,22 @@ void UniformFieldFastSimulationModel::ActivateForChargedParticles() {
   }
 
   auto* particleIterator = G4ParticleTable::GetParticleTable()->GetIterator();
+  auto* transportationManager =
+      G4TransportationManager::GetTransportationManager();
+  auto* trackingNavigator = transportationManager == nullptr
+                                ? nullptr
+                                : transportationManager->GetNavigatorForTracking();
+  auto* worldVolume = trackingNavigator == nullptr
+                          ? nullptr
+                          : trackingNavigator->GetWorldVolume();
+  if (worldVolume == nullptr) {
+    G4Exception("UniformFieldFastSimulationModel::ActivateForChargedParticles",
+                "UniformFieldFastSim011", FatalException,
+                "Cannot attach fast simulation before the tracking world is "
+                "available.");
+    return;
+  }
+
   particleIterator->reset();
   while ((*particleIterator)()) {
     auto* particle = particleIterator->value();
@@ -149,7 +184,28 @@ void UniformFieldFastSimulationModel::ActivateForChargedParticles() {
       continue;
     }
     auto* processManager = particle->GetProcessManager();
-    if (processManager != nullptr) {
+    if (processManager == nullptr) {
+      continue;
+    }
+
+    auto* processList = processManager->GetProcessList();
+    G4bool processFound = false;
+    for (G4int index = 0; index < processManager->GetProcessListLength();
+         ++index) {
+      auto* fastSimulationProcess =
+          dynamic_cast<G4FastSimulationManagerProcess*>((*processList)[index]);
+      if (fastSimulationProcess == nullptr ||
+          fastSimulationProcess->GetProcessName() !=
+              "fastSimProcess_massGeom") {
+        continue;
+      }
+
+      fastSimulationProcess->SetWorldVolume(worldVolume);
+      processFound = true;
+      break;
+    }
+
+    if (!processFound) {
       G4FastSimulationHelper::ActivateFastSimulation(processManager);
     }
   }

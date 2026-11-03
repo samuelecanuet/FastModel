@@ -3,86 +3,123 @@
 #include "G4Box.hh"
 #include "G4AffineTransform.hh"
 #include "G4Exception.hh"
+#include "G4GeometryTolerance.hh"
 #include "G4LogicalVolume.hh"
 #include "G4Material.hh"
 #include "G4NistManager.hh"
+#include "G4Navigator.hh"
 #include "G4PVPlacement.hh"
 #include "G4PhysicalVolumeStore.hh"
 #include "G4PhysicalConstants.hh"
 #include "G4Region.hh"
+#include "G4RegionStore.hh"
 #include "G4SystemOfUnits.hh"
 #include "G4Tubs.hh"
+#include "G4TransportationManager.hh"
 #include "G4VSolid.hh"
 #include "G4VPhysicalVolume.hh"
 
 #include <algorithm>
 #include <cstddef>
+#include <unordered_set>
 #include <vector>
 
 namespace {
+void CollectWorldTransforms(
+    const G4VPhysicalVolume* currentVolume,
+    const G4VPhysicalVolume* targetVolume,
+    const G4AffineTransform& currentToWorld,
+    std::vector<G4AffineTransform>& worldTransforms) {
+  if (currentVolume == nullptr) {
+    return;
+  }
+
+  if (currentVolume == targetVolume) {
+    worldTransforms.push_back(currentToWorld);
+  }
+
+  const auto* logicalVolume = currentVolume->GetLogicalVolume();
+  if (logicalVolume == nullptr) {
+    return;
+  }
+
+  for (G4int daughterIndex = 0;
+       daughterIndex < logicalVolume->GetNoDaughters(); ++daughterIndex) {
+    const auto* daughter = logicalVolume->GetDaughter(daughterIndex);
+    if (daughter == nullptr) {
+      continue;
+    }
+
+    const G4AffineTransform daughterToMother(
+        daughter->GetObjectRotation(), daughter->GetObjectTranslation());
+    CollectWorldTransforms(daughter, targetVolume,
+                           currentToWorld * daughterToMother,
+                           worldTransforms);
+  }
+}
+
 std::vector<G4AffineTransform> GetWorldTransforms(
-    const G4VPhysicalVolume* volume, std::size_t depth = 0) {
-  const auto* volumeStore = G4PhysicalVolumeStore::GetInstance();
-  if (volume == nullptr || depth > volumeStore->size()) {
+    const G4VPhysicalVolume* volume,
+    const G4VPhysicalVolume* worldVolume) {
+  if (volume == nullptr || worldVolume == nullptr) {
     return {};
   }
 
-  const G4AffineTransform localToMother(volume->GetObjectRotation(),
-                                        volume->GetObjectTranslation());
-  const auto* motherLogical = volume->GetMotherLogical();
-  if (motherLogical == nullptr) {
-    return {localToMother};
-  }
-
+  const G4AffineTransform worldToGlobal(worldVolume->GetObjectRotation(),
+                                        worldVolume->GetObjectTranslation());
   std::vector<G4AffineTransform> worldTransforms;
-  for (const auto* possibleMother : *volumeStore) {
-    if (possibleMother->GetLogicalVolume() != motherLogical) {
-      continue;
-    }
-    for (const auto& motherTransform :
-         GetWorldTransforms(possibleMother, depth + 1)) {
-      worldTransforms.push_back(motherTransform * localToMother);
-    }
-  }
+  CollectWorldTransforms(worldVolume, volume, worldToGlobal, worldTransforms);
   return worldTransforms;
 }
 
-G4bool DoFastVolumesOverlap(const G4VPhysicalVolume* first,
-                            const G4VPhysicalVolume* second) {
-  const auto* firstSolid = first->GetLogicalVolume()->GetSolid();
-  const auto* secondSolid = second->GetLogicalVolume()->GetSolid();
-  const auto firstTransforms = GetWorldTransforms(first);
-  const auto secondTransforms = GetWorldTransforms(second);
-  if (firstTransforms.empty() || secondTransforms.empty()) {
-    G4ExceptionDescription description;
-    description << "Could not resolve the placement hierarchy while checking "
-                   "fast-volume overlap between '"
-                << first->GetName() << "' and '" << second->GetName() << "'.";
-    G4Exception("UniformFieldFastGeometry::CheckForOverlaps",
-                "UniformFieldFastGeometry004", FatalException, description);
-    return false;
+struct FastVolumeInstance {
+  const G4VPhysicalVolume* volume;
+  G4AffineTransform localToWorld;
+};
+
+G4bool HaveSameTransform(const G4AffineTransform& first,
+                         const G4AffineTransform& second) {
+  const G4ThreeVector probes[] = {
+      G4ThreeVector(), G4ThreeVector(1.0 * mm, 0.0, 0.0),
+      G4ThreeVector(0.0, 1.0 * mm, 0.0),
+      G4ThreeVector(0.0, 0.0, 1.0 * mm)};
+  const auto tolerance =
+      G4GeometryTolerance::GetInstance()->GetSurfaceTolerance();
+  for (const auto& probe : probes) {
+    if ((first.TransformPoint(probe) - second.TransformPoint(probe)).mag() >
+        tolerance) {
+      return false;
+    }
+  }
+  return true;
+}
+
+G4bool DoFastVolumeInstancesOverlap(const FastVolumeInstance& first,
+                                    const FastVolumeInstance& second) {
+  const auto* firstSolid = first.volume->GetLogicalVolume()->GetSolid();
+  const auto* secondSolid = second.volume->GetLogicalVolume()->GetSolid();
+  if (HaveSameTransform(first.localToWorld, second.localToWorld) &&
+      firstSolid->Inside(G4ThreeVector()) == kInside &&
+      secondSolid->Inside(G4ThreeVector()) == kInside) {
+    return true;
   }
 
   constexpr G4int samplesPerDirection = 10000;
-  for (const auto& firstTransform : firstTransforms) {
-    for (const auto& secondTransform : secondTransforms) {
-      for (G4int sample = 0; sample < samplesPerDirection; ++sample) {
-        const auto firstSurfacePoint =
-            firstTransform.TransformPoint(firstSolid->GetPointOnSurface());
-        const auto firstPointInSecond =
-            secondTransform.InverseTransformPoint(firstSurfacePoint);
-        if (secondSolid->Inside(firstPointInSecond) == kInside) {
-          return true;
-        }
+  for (G4int sample = 0; sample < samplesPerDirection; ++sample) {
+    const auto firstSurfacePoint = first.localToWorld.TransformPoint(
+        firstSolid->GetPointOnSurface());
+    const auto firstPointInSecond = second.localToWorld.InverseTransformPoint(
+        firstSurfacePoint);
+    if (secondSolid->Inside(firstPointInSecond) == kInside) {
+      return true;
+    }
 
-        const auto secondSurfacePoint =
-            secondTransform.TransformPoint(secondSolid->GetPointOnSurface());
-        const auto secondPointInFirst =
-            firstTransform.InverseTransformPoint(secondSurfacePoint);
-        if (firstSolid->Inside(secondPointInFirst) == kInside) {
-          return true;
-        }
-      }
+    const auto secondSurfacePoint = second.localToWorld.TransformPoint(
+        secondSolid->GetPointOnSurface());
+    const auto secondPointInFirst = first.localToWorld.InverseTransformPoint(
+        secondSurfacePoint);
+    if (firstSolid->Inside(secondPointInFirst) == kInside) {
+      return true;
     }
   }
   return false;
@@ -104,7 +141,10 @@ void RegisterFastVolume(G4VPhysicalVolume* fastVolume) {
                               volumeStore->end();
                      }),
       fastVolumes.end());
-  fastVolumes.push_back(fastVolume);
+  if (std::find(fastVolumes.begin(), fastVolumes.end(), fastVolume) ==
+      fastVolumes.end()) {
+    fastVolumes.push_back(fastVolume);
+  }
 }
 }
 
@@ -168,27 +208,56 @@ void UniformFieldFastGeometry::Build(const G4String& name,
   fLogicalVolume = new G4LogicalVolume(fSolid, vacuum, name + "_Logical");
   fPhysicalVolume = new G4PVPlacement(nullptr, position, fLogicalVolume, name,
                                       mother, false, 0, false);
-  fRegion = new G4Region(fRegionName);
+  fRegion = G4RegionStore::GetInstance()->FindOrCreateRegion(fRegionName);
   fRegion->AddRootLogicalVolume(fLogicalVolume);
   RegisterFastVolume(fPhysicalVolume);
 }
 
 void UniformFieldFastGeometry::CheckForOverlaps(
     const std::vector<G4VPhysicalVolume*>& fastVolumes) {
-  for (std::size_t firstIndex = 0; firstIndex < fastVolumes.size();
+  auto* transportationManager =
+      G4TransportationManager::GetTransportationManager();
+  auto* navigator = transportationManager == nullptr
+                        ? nullptr
+                        : transportationManager->GetNavigatorForTracking();
+  const auto* worldVolume =
+      navigator == nullptr ? nullptr : navigator->GetWorldVolume();
+  if (worldVolume == nullptr) {
+    G4Exception("UniformFieldFastGeometry::CheckForOverlaps",
+                "UniformFieldFastGeometry004", FatalException,
+                "Cannot check fast-volume overlaps before the tracking world "
+                "is available.");
+    return;
+  }
+
+  // A geometry reinitialization can leave old placements in Geant4's stores.
+  // Keep only registry entries reachable from the current world, then make
+  // one record per active placement instance (a logical mother can be reused).
+  std::vector<FastVolumeInstance> activeInstances;
+  std::unordered_set<const G4VPhysicalVolume*> seenVolumes;
+  for (const auto* volume : fastVolumes) {
+    if (volume == nullptr || !seenVolumes.insert(volume).second) {
+      continue;
+    }
+
+    for (const auto& transform : GetWorldTransforms(volume, worldVolume)) {
+      activeInstances.push_back({volume, transform});
+    }
+  }
+
+  for (std::size_t firstIndex = 0; firstIndex < activeInstances.size();
        ++firstIndex) {
     for (std::size_t secondIndex = firstIndex + 1;
-         secondIndex < fastVolumes.size(); ++secondIndex) {
-      const auto* first = fastVolumes[firstIndex];
-      const auto* second = fastVolumes[secondIndex];
-      if (first == nullptr || second == nullptr ||
-          !DoFastVolumesOverlap(first, second)) {
+         secondIndex < activeInstances.size(); ++secondIndex) {
+      const auto& first = activeInstances[firstIndex];
+      const auto& second = activeInstances[secondIndex];
+      if (!DoFastVolumeInstancesOverlap(first, second)) {
         continue;
       }
 
       G4ExceptionDescription description;
-      description << "Fast-simulation volumes '" << first->GetName()
-                  << "' and '" << second->GetName()
+      description << "Fast-simulation volumes '" << first.volume->GetName()
+                  << "' and '" << second.volume->GetName()
                   << "' overlap. Fast volumes must not overlap, including "
                      "when both use vacuum material.";
       G4Exception("UniformFieldFastGeometry::CheckForOverlaps",
@@ -199,35 +268,4 @@ void UniformFieldFastGeometry::CheckForOverlaps(
 
 void UniformFieldFastGeometry::CheckRegisteredOverlaps() {
   CheckForOverlaps(RegisteredFastVolumes());
-}
-
-void UniformFieldFastGeometry::CheckNonVacuumOverlaps(
-    const G4Material* vacuumMaterial) {
-  if (vacuumMaterial == nullptr) {
-    G4Exception("UniformFieldFastGeometry::CheckNonVacuumOverlaps",
-                "UniformFieldFastGeometry006", FatalException,
-                "A vacuum material is required to check geometry overlaps.");
-    return;
-  }
-
-  for (auto* volume : *G4PhysicalVolumeStore::GetInstance()) {
-    if (volume == nullptr || !volume->CheckOverlaps(10000, 0.0, false)) {
-      continue;
-    }
-
-    const auto* logicalVolume = volume->GetLogicalVolume();
-    const auto* material =
-        logicalVolume == nullptr ? nullptr : logicalVolume->GetMaterial();
-    if (material == vacuumMaterial) {
-      continue;
-    }
-
-    G4ExceptionDescription description;
-    description << "Geometry overlap detected for physical volume '"
-                << volume->GetName() << "' with material '"
-                << (material == nullptr ? "<null>" : material->GetName())
-                << "'. Overlaps are allowed only for vacuum volumes.";
-    G4Exception("UniformFieldFastGeometry::CheckNonVacuumOverlaps",
-                "UniformFieldFastGeometry007", FatalException, description);
-  }
 }

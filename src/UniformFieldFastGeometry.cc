@@ -14,6 +14,7 @@
 #include "G4Region.hh"
 #include "G4RegionStore.hh"
 #include "G4SystemOfUnits.hh"
+#include "G4Threading.hh"
 #include "G4Tubs.hh"
 #include "G4TransportationManager.hh"
 #include "G4VSolid.hh"
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <mutex>
 #include <unordered_set>
 #include <vector>
 
@@ -130,7 +132,13 @@ std::vector<G4VPhysicalVolume*>& RegisteredFastVolumes() {
   return fastVolumes;
 }
 
+std::mutex& FastVolumeRegistryMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
 void RegisterFastVolume(G4VPhysicalVolume* fastVolume) {
+  const std::lock_guard<std::mutex> lock(FastVolumeRegistryMutex());
   auto& fastVolumes = RegisteredFastVolumes();
   const auto* volumeStore = G4PhysicalVolumeStore::GetInstance();
   fastVolumes.erase(
@@ -267,5 +275,17 @@ void UniformFieldFastGeometry::CheckForOverlaps(
 }
 
 void UniformFieldFastGeometry::CheckRegisteredOverlaps() {
-  CheckForOverlaps(RegisteredFastVolumes());
+  // ConstructSDandField is called for each worker in MT runs. The master owns
+  // the shared geometry check; worker navigators and stores must not race over
+  // the process-wide registry or repeat its randomized surface sampling.
+  if (G4Threading::IsWorkerThread()) {
+    return;
+  }
+
+  std::vector<G4VPhysicalVolume*> fastVolumes;
+  {
+    const std::lock_guard<std::mutex> lock(FastVolumeRegistryMutex());
+    fastVolumes = RegisteredFastVolumes();
+  }
+  CheckForOverlaps(fastVolumes);
 }
